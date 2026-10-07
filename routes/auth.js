@@ -1,22 +1,52 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const Customer = require('../models/Customer');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Sign Up
-router.post('/signup', async (req, res) => {
+// 1. Sign Up / Register (Accepts BOTH '/signup' and '/register')
+router.post(['/signup', '/register'], async (req, res) => {
   try {
-    const { email, password, name } = req.body;
+    const { email, password, name, adminKey } = req.body;
 
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({ error: 'Email already registered' });
     }
 
-    const user = new User({ email, password, name });
+    // Determine role: admin@beastfuel.com automatically gets "admin",
+    // or if the secret adminKey is provided, otherwise default to "user"
+    let role = 'user';
+    if (email.toLowerCase() === 'admin@beastfuel.com' || adminKey === process.env.ADMIN_SECRET_KEY) {
+      role = 'admin';
+    }
+
+    const user = new User({ email, password, name, role });
     await user.save();
+
+    // Automatically sync customer record in the database for regular users
+    if (role === 'user') {
+      try {
+        await Customer.findOneAndUpdate(
+          { email: user.email },
+          {
+            $setOnInsert: {
+              userId: user._id,
+              name: user.name || user.email.split('@')[0],
+              email: user.email,
+              status: 'Active',
+              totalOrders: 0,
+              totalSpent: 0
+            }
+          },
+          { upsert: true, new: true }
+        );
+      } catch (custErr) {
+        console.warn('Customer record sync note:', custErr.message);
+      }
+    }
 
     const token = jwt.sign(
       { userId: user._id },
@@ -33,7 +63,7 @@ router.post('/signup', async (req, res) => {
   }
 });
 
-// Login
+// 2. Login
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -58,14 +88,16 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// Get current user
-router.get('/me', authenticate, (req, res) => {
+// 3. Get Current User / Profile (Accepts BOTH '/me' and '/profile')
+router.get(['/me', '/profile'], authenticate, (req, res) => {
+  const userData = { id: req.user._id, email: req.user.email, name: req.user.name, role: req.user.role };
   res.json({
-    user: { id: req.user._id, email: req.user.email, name: req.user.name, role: req.user.role }
+    ...userData,
+    user: userData
   });
 });
 
-// Update password
+// 4. Update Password
 router.put('/update-password', authenticate, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
@@ -93,7 +125,7 @@ router.put('/update-password', authenticate, async (req, res) => {
   }
 });
 
-// Update profile (name, email)
+// 5. Update Profile (name, email)
 router.put('/update-profile', authenticate, async (req, res) => {
   try {
     const { name, email } = req.body;
